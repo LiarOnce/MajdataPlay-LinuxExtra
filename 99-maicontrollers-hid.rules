@@ -1,0 +1,8 @@
+KERNEL=="ttyACM[0-9]*", MODE="0666", GROUP="dialout"
+KERNEL=="ttyUSB[0-9]*", MODE="0666", GROUP="dialout"
+# General IO4 Controller
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0ca3", ATTRS{idProduct}=="0021", GROUP="plugdev", MODE="0660"
+# ADX Controller
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2e3c", ATTRS{idProduct}=="5750", GROUP="plugdev", MODE="0660"
+# Dao Controller
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0e8f", ATTRS{idProduct}=="1224", GROUP="plugdev", MODE="0660"
