@@ -12,6 +12,8 @@ NC='\033[0m' # No Color
 dry_run=false
 search_dir="MaiCharts"
 declare -a mp4_files
+backup_enabled=true
+restore_mode=false
 
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
@@ -60,6 +62,144 @@ find_mp4_files() {
     return 0
 }
 
+# Backup original MP4 file
+backup_mp4() {
+    local input_file="$1"
+    local backup_file="${input_file}.bak"
+    
+    if [ "$backup_enabled" = false ]; then
+        return 0
+    fi
+    
+    if [ -f "$backup_file" ]; then
+        log_warning "Backup file already exists, skipping backup: $backup_file"
+        return 1
+    fi
+    
+    if [ "$dry_run" = true ]; then
+        log_info "[DRY-RUN] will backup: mv \"$input_file\" \"$backup_file\""
+        return 0
+    fi
+    
+    if mv "$input_file" "$backup_file"; then
+        log_success "Backup created: $backup_file"
+        return 0
+    else
+        log_error "Failed to create backup: $input_file"
+        return 1
+    fi
+}
+
+# Restore backup files
+restore_backup() {
+    local backup_file="$1"
+    local original_file="${backup_file%.bak}"
+    local webm_file="${original_file%.mp4}.webm"
+    
+    if [ ! -f "$backup_file" ]; then
+        log_error "Backup file not found: $backup_file"
+        return 1
+    fi
+    
+    if [ -f "$original_file" ]; then
+        log_warning "Original file already exists, skipping restore: $original_file"
+        return 2
+    fi
+    
+    # Delete corresponding webm file if it exists
+    if [ -f "$webm_file" ]; then
+        if [ "$dry_run" = true ]; then
+            log_info "[DRY-RUN] will delete webm file: rm \"$webm_file\""
+        else
+            if rm "$webm_file"; then
+                log_success "Deleted webm file: $webm_file"
+            else
+                log_error "Failed to delete webm file: $webm_file"
+                return 1
+            fi
+        fi
+    else
+        log_info "No corresponding webm file found: $webm_file"
+    fi
+    
+    if [ "$dry_run" = true ]; then
+        log_info "[DRY-RUN] will restore: mv \"$backup_file\" \"$original_file\""
+        return 0
+    fi
+    
+    if mv "$backup_file" "$original_file"; then
+        log_success "Restored: $original_file"
+        return 0
+    else
+        log_error "Failed to restore: $backup_file"
+        return 1
+    fi
+}
+
+# Find and restore all backup files
+find_and_restore_backups() {
+    log_info "Searching for backup files..."
+    
+    local backup_files=()
+    mapfile -t backup_files < <(find "MaiCharts" -name "*.mp4.bak" -type f 2>/dev/null)
+    
+    if [ ${#backup_files[@]} -eq 0 ]; then
+        log_warning "No backup files found"
+        return 1
+    fi
+    
+    log_info "Found ${#backup_files[@]} backup files:"
+    for file in "${backup_files[@]}"; do
+        echo "  - $file"
+    done
+    
+    local total_files=${#backup_files[@]}
+    local success_count=0
+    local fail_count=0
+    local skip_count=0
+    
+    log_info "Starting restore ($total_files files)..."
+    echo "========================================"
+    
+    for ((i=0; i<total_files; i++)); do
+        local backup_file="${backup_files[$i]}"
+        
+        echo -e "\n[File $((i+1))/$total_files]"
+        
+        local result
+        set +e
+        restore_backup "$backup_file"
+        result=$?
+        set -e
+        
+        case $result in
+            0) success_count=$((success_count + 1)) ;;
+            1) fail_count=$((fail_count + 1)) ;;
+            2) skip_count=$((skip_count + 1)) ;;
+        esac
+        
+        echo "In progress: $((i+1))/$total_files | Success: $success_count | Fail: $fail_count | Skip: $skip_count"
+    done
+    
+    echo "========================================"
+    log_info "Restore completed."
+    log_info "Total: $total_files files"
+    
+    if [ $success_count -gt 0 ]; then
+        log_success "Success: $success_count files"
+    fi
+    
+    if [ $fail_count -gt 0 ]; then
+        log_error "Fail: $fail_count files"
+    fi
+    
+    if [ $skip_count -gt 0 ]; then
+        log_warning "Skip: $skip_count files"
+    fi
+    
+    return 0
+}
+
 # Transcoding MP4 to WebM(VP8)
 transcode_to_webm() {
     local input_file="$1"
@@ -76,6 +216,9 @@ transcode_to_webm() {
     # dry-run
     if [ "$dry_run" = true ]; then
         log_info "[DRY-RUN] will run: ffmpeg -i \"$input_file\" -c:v libvpx -c:a libvorbis -f webm -y \"$output_file\""
+        if [ "$backup_enabled" = true ]; then
+            log_info "[DRY-RUN] will backup: mv \"$input_file\" \"${input_file}.bak\""
+        fi
         return 0
     fi
     
@@ -85,6 +228,9 @@ transcode_to_webm() {
         -f webm \
         -y "$output_file" 2>&1 | tee /tmp/ffmpeg_output.log; then
         log_success "Transcode success: $output_file"
+        
+        # Backup original file after successful transcode
+        backup_mp4 "$input_file"
         return 0
     else
         log_error "Transcode failed: $input_file"
@@ -105,6 +251,14 @@ main() {
         log_warning "DRY-RUN Mode: Only display the actions to be performed."
     fi
     
+    # Check if we're in restore mode
+    if [ "$restore_mode" = true ]; then
+        log_info "RESTORE MODE: Restoring backup files"
+        find_and_restore_backups
+        return 0
+    fi
+    
+    # Normal transcode mode
     check_dependencies
 
     if ! find_mp4_files; then
@@ -176,6 +330,8 @@ usage() {
     echo "options:"
     echo "  -h, --help     Show this help"
     echo "  --dry-run      Only display the files found; no transcode."
+    echo "  -r, --restore  Restore backup files (.mp4.bak -> .mp4) and delete corresponding .webm files"
+    echo "  --no-backup    Disable backup of original files"
 }
 
 parse_args() {
@@ -187,6 +343,14 @@ parse_args() {
                 ;;
             --dry-run)
                 dry_run=true
+                shift
+                ;;
+            -r|--restore)
+                restore_mode=true
+                shift
+                ;;
+            --no-backup)
+                backup_enabled=false
                 shift
                 ;;
             *)
