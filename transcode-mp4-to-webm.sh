@@ -200,7 +200,47 @@ find_and_restore_backups() {
     return 0
 }
 
-# Transcoding MP4 to WebM(VP8)
+# Get video bitrate from source file
+get_video_bitrate() {
+    local input_file="$1"
+    local bitrate
+    
+    bitrate=$(ffprobe -v error -select_streams v:0 \
+        -show_entries stream=bit_rate \
+        -of default=noprint_wrappers=1:nokey=1 \
+        "$input_file" 2>/dev/null)
+    
+    if [ -z "$bitrate" ] || [ "$bitrate" = "N/A" ] || [ "$bitrate" = "0" ]; then
+        log_warning "Cannot get video bitrate from $input_file, using default"
+        echo ""
+        return 1
+    fi
+    
+    echo "$bitrate"
+    return 0
+}
+
+# Get audio bitrate from source file
+get_audio_bitrate() {
+    local input_file="$1"
+    local bitrate
+    
+    bitrate=$(ffprobe -v error -select_streams a:0 \
+        -show_entries stream=bit_rate \
+        -of default=noprint_wrappers=1:nokey=1 \
+        "$input_file" 2>/dev/null)
+    
+    if [ -z "$bitrate" ] || [ "$bitrate" = "N/A" ] || [ "$bitrate" = "0" ]; then
+        log_warning "Cannot get audio bitrate from $input_file, using default"
+        echo ""
+        return 1
+    fi
+    
+    echo "$bitrate"
+    return 0
+}
+
+# Transcoding MP4 to WebM(VP8) with source bitrate preservation
 transcode_to_webm() {
     local input_file="$1"
     local output_file="${input_file%.mp4}.webm"
@@ -213,20 +253,44 @@ transcode_to_webm() {
         return 2
     fi
     
+    # Get source bitrates
+    local video_bitrate=""
+    local audio_bitrate=""
+    local ffmpeg_cmd="ffmpeg -i \"$input_file\""
+    
+    if video_bitrate=$(get_video_bitrate "$input_file"); then
+        ffmpeg_cmd="$ffmpeg_cmd -b:v ${video_bitrate}"
+        log_info "Using source video bitrate: $((video_bitrate / 1000)) kbps"
+    else
+        ffmpeg_cmd="$ffmpeg_cmd -b:v 1M"  # Default 1 Mbps
+        log_info "Using default video bitrate: 1 Mbps"
+    fi
+    
+    if audio_bitrate=$(get_audio_bitrate "$input_file"); then
+        ffmpeg_cmd="$ffmpeg_cmd -b:a ${audio_bitrate}"
+        log_info "Using source audio bitrate: $((audio_bitrate / 1000)) kbps"
+    else
+        ffmpeg_cmd="$ffmpeg_cmd -b:a 128k"  # Default 128 kbps
+        log_info "Using default audio bitrate: 128 kbps"
+    fi
+    
+    # Complete ffmpeg command with quality optimization for VP8
+    # -quality good: better encoding quality
+    # -cpu-used 0: best quality (slowest)
+    # -qmin 10 -qmax 42: quantization parameter range
+    # -threads 0: auto-detect number of threads
+    ffmpeg_cmd="$ffmpeg_cmd -c:v libvpx -quality good -cpu-used 0 -qmin 10 -qmax 42 -threads 0 -c:a libvorbis -f webm -y \"$output_file\""
+    
     # dry-run
     if [ "$dry_run" = true ]; then
-        log_info "[DRY-RUN] will run: ffmpeg -i \"$input_file\" -c:v libvpx -c:a libvorbis -f webm -y \"$output_file\""
+        log_info "[DRY-RUN] will run: $ffmpeg_cmd"
         if [ "$backup_enabled" = true ]; then
             log_info "[DRY-RUN] will backup: mv \"$input_file\" \"${input_file}.bak\""
         fi
         return 0
     fi
     
-    if ffmpeg -i "$input_file" \
-        -c:v libvpx \
-        -c:a libvorbis \
-        -f webm \
-        -y "$output_file" 2>&1 | tee /tmp/ffmpeg_output.log; then
+    if eval "$ffmpeg_cmd" 2>&1 | tee /tmp/ffmpeg_output.log; then
         log_success "Transcode success: $output_file"
         
         # Backup original file after successful transcode
